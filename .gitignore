@@ -1,0 +1,21 @@
+# 观测数据。真实航飞数据不入库: 仓库是公开的。
+data/
+
+# 解算结果
+*.pos
+rtk_std_analysis*.txt
+test-rtk.txt
+proc/rtkproc_tmp.*
+proc/rtkproc_base_spp.pos
+
+# 构建产物与打包件
+*.o
+*.a
+*.rar
+*.bak
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
