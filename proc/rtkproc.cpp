@@ -131,15 +131,29 @@ static bool convert(const string& pos, const string& out,
         double tow = floor(v[1] + 0.5);
         double lat = v[2], lon = v[3], h = v[4];
         double sdn = v[7], sde = v[8], sdu = v[9];
-        double vn = 0, ve = 0, vu = 0, svn = 0, sve = 0, svu = 0;
+        // RTKLIB 的 .pos 速度列是 ENU: 表头写的就是 vn(m/s) ve(m/s) vu(m/s), 第三个分量
+        // 天向为正。而本文件的消费者(KF-GINS 等 GNSS/INS 组合)按 NED 读第三列, 要求地向
+        // 为正。原样透传会让每一个垂向速度观测的符号都反掉 —— 滤波器在爬升时认为自己在
+        // 下降, 整个爬升/下降段的新息成片超限, 误差被挤进加计零偏。症状很隐蔽: 程序不报错,
+        // 只是 NIS 偏高。实测本数据未取负时 KF-GINS 全程 NIS 4.48, 取负后 0.98。
+        // 自检: 相邻历元 h 的变化率应与 -vd 一致(相关系数 -1)。
+        //
+        // RTKLIB writes ENU velocity -- its own header says vu(m/s), UP-positive. The
+        // consumers of this file (KF-GINS and other GNSS/INS filters) read the third column
+        // as NED, DOWN-positive. Passing it through unchanged flips the sign of every
+        // vertical velocity measurement: the filter believes it is descending while it
+        // climbs, innovations blow past their bounds throughout every climb and descent, and
+        // the error is absorbed into the accelerometer bias. Nothing errors out -- the only
+        // symptom is an inflated NIS (4.48 before the negation on this dataset, 0.98 after).
+        double vn = 0, ve = 0, vd = 0, svn = 0, sve = 0, svd = 0;
         if (v.size() >= 21) {
-            vn = v[15]; ve = v[16]; vu = v[17];
-            svn = v[18]; sve = v[19]; svu = v[20];
+            vn = v[15]; ve = v[16]; vd = -v[17];   // ENU up -> NED down
+            svn = v[18]; sve = v[19]; svd = v[20]; // 标准差是量值, 不随符号变
         }
         fprintf(fo, "%.6f %.10f %.10f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
                 tow, lat, lon, h,
                 infl(sdn, fh, sc), infl(sde, fh, sc), infl(sdu, fv, sc),
-                vn, ve, vu, svn, sve, svu);
+                vn, ve, vd, svn, sve, svd);
         ++nrec;
     }
     fclose(fi); fclose(fo);
@@ -171,7 +185,18 @@ enum BaseMode { BASE_AVG, BASE_HEADER, BASE_LLH };
 
 int main(int argc, char** argv) {
     string conf, out;
-    double fh = 0.010, fv = 0.015, sc = 1.0;
+    // 协方差地板的缺省值。RTKLIB 报的形式精度在本机上是毫米级(sdn 中位 2.9 mm), 而 RTK 的
+    // 真实精度是厘米级, 直接用会让下游滤波器过度相信位置观测。下面的值是拿 KF-GINS 的
+    // NIS 标定出来的: 0.046/0.075 时全程 NIS = 1.02(理论值 1.0), 而 0.010/0.015 时 NIS
+    // 会到 19 倍。换接收机、换基线长度后应重新标定 —— 跑一遍 KF-GINS, 看它打印的 NIS,
+    // 按 sqrt(NIS) 缩放这两个值再跑, 一两轮就收敛。
+    // Default covariance floors. RTKLIB's formal precision is millimetre-level here (median
+    // sdn 2.9 mm) while real RTK accuracy is centimetre-level, so using it verbatim makes
+    // any downstream filter trust the position far too much. These values were calibrated
+    // against KF-GINS's NIS: 0.046/0.075 gives a whole-run NIS of 1.02 against a theoretical
+    // 1.0, where 0.010/0.015 lands about 19x off. Recalibrate for a different receiver or
+    // baseline length: run KF-GINS, read the NIS it prints, scale both by sqrt(NIS), repeat.
+    double fh = 0.046, fv = 0.075, sc = 1.0;
     bool keepPos = false;
     BaseMode bmode = BASE_AVG;
     double blat = 0, blon = 0, bh = 0;

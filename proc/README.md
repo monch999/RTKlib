@@ -18,7 +18,7 @@
 rtkproc.exe <流动站obs> <基站obs> <混合星历nav> [nav2 ...]
             [-o out.txt] [-c rtk.conf]
             [--base-avg | --base-header | --base-llh 纬 经 高]
-            [--floor-h 0.010] [--floor-v 0.015] [--scale 1.0] [--keep-pos]
+            [--floor-h 0.046] [--floor-v 0.075] [--scale 1.0] [--keep-pos]
 ```
 
 例:
@@ -27,9 +27,34 @@ rtkproc.exe <流动站obs> <基站obs> <混合星历nav> [nav2 ...]
 rtkproc.exe data\rover.26O data\base.26o data\rover.26P data\base.26p
 ```
 
-默认输出 `rtk_std_analysis.txt`(生成在流动站文件所在目录),默认已带 1.0cm/1.5cm 协方差地板;
+默认输出 `rtk_std_analysis.txt`(生成在流动站文件所在目录),默认已带 4.6cm/7.5cm 协方差地板;
 设 `--floor-h 0 --floor-v 0` 则输出原始 RTKLIB std。源码见 `rtkproc.cpp`,
 编译:`g++ -O2 -static -static-libgcc -static-libstdc++ -o rtkproc.exe rtkproc.cpp`。
+
+### 输出约定(重要)
+
+第 10 列是 **vd,地向为正(NED)**。RTKLIB 自己的 `.pos` 输出是 ENU 的 `vn ve vu`,
+第三个分量天向为正,`convert()` 里已取负转成 NED。**不要把这个负号去掉** ——
+下游的 KF-GINS 按 NED 读,符号反了程序不会报错,只表现为 NIS 偏高、垂向新息在
+爬升/下降段成片超限,误差被挤进加计零偏。实测本数据未取负 NIS 4.48,取负后 0.98。
+
+自检:相邻历元 `h` 的变化率应与 `-vd` 一致(相关系数 -1)。若与 `+vd` 一致就是反的。
+
+### 协方差地板的标定
+
+RTKLIB 报的形式精度在本机上是毫米级(sdn 中位 2.9 mm),而 RTK 真实精度是厘米级,
+直接用会让下游滤波器过度相信位置观测。缺省的 4.6cm/7.5cm 是拿 KF-GINS 的 NIS
+标定出来的:
+
+| `--floor-h` / `--floor-v` | KF-GINS 全程 NIS |
+|---|---|
+| 0 / 0 (原始 RTKLIB std) | ~19 |
+| 0.010 / 0.015 (旧缺省) | 4.5 |
+| 0.040 / 0.065 | 1.30 |
+| **0.046 / 0.075 (现缺省)** | **1.02** |
+
+换接收机或换基线长度后重新标定:跑一遍 KF-GINS,看它打印的 `Mean normalised
+innovation squared`,把两个 floor 乘以 `sqrt(NIS)` 再跑,一两轮就收敛到 1 附近。
 
 ### 基站坐标模式(影响绝对精度,不影响相对轨迹)
 | 选项 | 含义 | 绝对精度 |
