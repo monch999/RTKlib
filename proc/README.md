@@ -47,21 +47,22 @@ RTKLIB 报的形式精度在本机上是毫米级(sdn 中位 2.9 mm),而 RTK 真
 标定出来的:
 
 | `--floor-h` / `--floor-v` | KF-GINS 全程 NIS |
-|---|---|
-| 0 / 0 (原始 RTKLIB std) | ~19 |
-| 0.010 / 0.015 (旧缺省) | 4.5 |
-| 0.040 / 0.065 | 1.30 |
-| **0.046 / 0.075 (现缺省)** | **1.02** |
+| ------------------------- | -------------- |
+| 0 / 0 (原始 RTKLIB std)     | ~19            |
+| 0.010 / 0.015 (旧缺省)       | 4.5            |
+| 0.040 / 0.065             | 1.30           |
+| **0.046 / 0.075 (现缺省)**   | **1.02**       |
 
 换接收机或换基线长度后重新标定:跑一遍 KF-GINS,看它打印的 `Mean normalised
 innovation squared`,把两个 floor 乘以 `sqrt(NIS)` 再跑,一两轮就收敛到 1 附近。
 
 ### 基站坐标模式(影响绝对精度,不影响相对轨迹)
-| 选项 | 含义 | 绝对精度 |
-|------|------|---------|
+
+| 选项                    | 含义                                               | 绝对精度         |
+| --------------------- | ------------------------------------------------ | ------------ |
 | `--base-avg` **(默认)** | 对**整个基站文件**做单点定位(SPP)取均值,自动注入。**不限历元数**,任意批次时长通用 | ~1 m,且批次间可复现 |
-| `--base-header` | 直接用基站 RINEX 头 APPROX POSITION(单历元粗略 SPP) | ~1~5 m,批次间随机 |
-| `--base-llh 纬 经 高` | 用已知/CORS/PPP 精确坐标 | 厘米~分米 |
+| `--base-header`       | 直接用基站 RINEX 头 APPROX POSITION(单历元粗略 SPP)         | ~1~5 m,批次间随机 |
+| `--base-llh 纬 经 高`    | 用已知/CORS/PPP 精确坐标                                | 厘米~分米        |
 
 > 改基站坐标只是把整条轨迹**刚性平移**(实测:换坐标后各历元位移抖动仅 1~3 cm),
 > 相对轨迹、速度、姿态、内部几何完全不变。
@@ -78,8 +79,6 @@ innovation squared`,把两个 floor 乘以 `sqrt(NIS)` 再跑,一两轮就收敛
 | 流动站星历(混合, 含 GPS/GLO/GAL/BDS/QZS) | `data/20260630104518_181c.26P` |
 
 时间重叠段: GPS 周内秒 183057 ~ 184295 (2026-06-30 02:50:57 ~ 03:11:35 GPST), 1 Hz, 共 1236 历元。
-
-
 
 ## 手动运行(等价于 process.bat 内部做的事)
 
@@ -110,9 +109,43 @@ powershell -ExecutionPolicy Bypass -File ..\proc\pos2std.ps1 rover.pos rtk_std_a
 - `pos1-frequency=l1+2+3` (L1/L2/L5)
 - `pos1-soltype=combined` 前后向组合(让首历元也收敛/固定)
 - `pos1-navsys=61` GPS+GLO+GAL+QZS+BDS
-- `pos2-armode=continuous` 连续模糊度固定
+- `pos2-armode=fix-and-hold` 固定并保持
+- `pos2-gloarmode=off` **异厂商基站必须置 off，见下**
 - `ant2-postype=rinexhead` 基站坐标用 RINEX 头 APPROX POSITION
 - `stats-errdoppler=2` 影响速度标准差量级
+
+### `pos2-gloarmode` 必须按基站厂商设置
+
+流动站是 Unicore UB4B0，基站是中海达 iRTK10，**异厂商的 GLONASS 频间偏差(IFB)没有标定**。
+`pos2-gloarmode=on` 时这些未建模的偏差会污染整组模糊度，表现为**全程 100% float、
+ratio 恒在 1.0 附近** —— 不报错，只是永远固定不了。实测 0813 架次二：
+
+| 配置 | 固定率 | 平均 ratio |
+| --- | --- | --- |
+| `gloarmode=on`, `armode=continuous` (旧缺省) | 0% | 1.0 |
+| `gloarmode=off`, `armode=continuous` | 52.1% | 3.8 |
+| `gloarmode=off`, `armode=fix-and-hold` (现缺省) | 62.8% | 18.2 |
+
+两者都固定的历元位置一致到 1 mm，fix-and-hold 只是把固定状态保持得更久，没有引入不同的解。
+float 相对 fixed 的系统差实测为**高程 0.24~0.52 m**、东向 0.08 m —— 这是绝对高程误差，会
+直接进正射产品。
+
+换成与流动站同厂商的基站后可以再打开 `gloarmode=on`(多 8~10 颗可固定卫星)，但换之前
+务必先按上表复核一次固定率。另：`pos1-elmask` 不要从 15 降到 10，实测固定率反而掉到 12%。
+
+### 解里混有 fix 和 float 时用 `pos2std_q.py` 而不是 `--floor-h/--floor-v`
+
+`rtkproc.exe` 的地板是全程一个值。一旦解里既有固定又有浮动，这个假设就不成立：
+RTKLIB 报的形式精度**完全区分不出两者**(实测浮动解的 sd 有时比固定解还小)，而真实精度
+差一个量级。后果是 KF-GINS 在 fix↔float 跳变处成片吃大新息 —— 0813 架次一在跳变处
+相邻历元的垂向位置增量与多普勒速度失配中位数 1.24 m，而 Q 不变时只有 0.026 m。
+
+```
+python pos2std_q.py rover.pos rtk.txt --float-h 0.15 --float-v 0.35
+```
+
+固定历元沿用标定好的 0.046/0.075，浮动历元单独给一个更大的地板，让滤波器在浮动段
+多依赖惯导。地板相同时该脚本与 `rtkproc.exe` 的输出逐字节一致(含 vd 取负的约定)。
 
 ## 与参考文件 rtk_std_analysis.txt 的对比 (全 1236 历元)
 
@@ -122,9 +155,4 @@ powershell -ExecutionPolicy Bypass -File ..\proc\pos2std.ps1 rover.pos rtk_std_a
   参考文件用了更大的观测噪声模型(或来自接收机自带 RTK 引擎)。
   如需让标准差数值也贴近参考, 调大 `stats-errphase`(如 0.006~0.02)。
 
-## 说明
-
-- 双天线: 你说两根天线在同一 .26O 文件。本流程按单天线(天线1 对 基站)解算即得到
-  与参考文件一致的单条轨迹。第二根天线若要做测姿/航向, 需要其独立观测流做
-  moving-base(`posmode=movingbase`), 那是另一步。
-- 基站/天线相位中心未加 ATX 改正, 是残余几 cm 系统差的主要来源。
+# 
