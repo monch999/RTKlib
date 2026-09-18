@@ -174,14 +174,59 @@ powershell -ExecutionPolicy Bypass -File ..\proc\pos2std.ps1 rover.pos rtk_std_a
 
 ## 关键配置 (proc/rtk.conf)
 
+适用硬件:流动站 Unicore UB4B0,基站中海达 iRTK10。
+
 - `pos1-posmode=kinematic` 动态
-- `pos1-frequency=l1+2+3` (L1/L2/L5)
+- `pos1-frequency=l1+2` L1/L2。`l1+2+3` 四个架次全部持平或略降,且 ratio 更低
 - `pos1-soltype=combined` 前后向组合(让首历元也收敛/固定)
-- `pos1-navsys=61` GPS+GLO+GAL+QZS+BDS
+- `pos1-navsys=41` GPS+GAL+BDS —— **去掉了 GLONASS 和 QZSS**,见下
+- `pos1-exclsats=C01…C16` **排除 BDS-2**,见下
+- `pos1-elmask=25` 逐架次可能要抬,`--auto-elmask` 会自己挑
 - `pos2-armode=fix-and-hold` 固定并保持
-- `pos2-gloarmode=off` **异厂商基站必须置 off，见下**
+- `pos2-gloarmode=off` **异厂商基站必须置 off,见下**
+- `pos2-arelmask=40` 只让 40 度以上的星参与固定(低仰角星仍参与定位)
+- `pos2-arlockcnt=20` 失锁后先锁 20 个历元再进模糊度集
+- `stats-errphase=0.006` / `stats-errphaseel=0.006` 见下
 - `ant2-postype=rinexhead` 基站坐标用 RINEX 头 APPROX POSITION
 - `stats-errdoppler=2` 影响速度标准差量级
+
+### 三处排除:QZSS / GLONASS / BDS-2
+
+2026-09 用 0104 项目四个架次逐项消融定下来的,每行都是"从缺省配置只改这一项":
+
+| 改动 | 20260903 | 0135 | 0818 | 0621 |
+| --- | --- | --- | --- | --- |
+| **缺省配置** | **93.7%** | **100.0%** | **98.0%** | **94.5%** |
+| `navsys` 加回 QZSS | 85.6% | 99.2% | 97.7% | 94.6% |
+| `navsys` 加回 GLONASS | 94.0% | 100.0% | 98.6% | **17.9%** |
+| 清空 `exclsats`(放回 BDS-2) | **23.3%** | 99.3% | 98.3% | 92.0% |
+| `arlockcnt` 20 → 0 | **50.9%** | 99.3% | 98.8% | 82.7% |
+| `arelmask` 40 → 20 | 90.4% | 99.2% | 97.4% | 94.6% |
+| `errphase` 0.006 → 0.003 | 90.6% | 89.5% | 95.4% | 90.6% |
+
+三处排除是同一种取舍:**加回去在三个架次上最多 +0.6 个点,在第四个架次上却是灾难性的**。
+少掉的卫星是真实代价(GLONASS 值 4 颗左右,BDS-2 值 7 颗),但这一对接收机上它们带来的
+是未标定的系统偏差,不是几何。
+
+- **QZSS**:流动站把 QZSS 的 L2 标成 `L2W`,而 RTKLIB 的 `codepris[QZS][1]="LSX"` 不含
+  `'W'`,读 RINEX 时优先级为 0 被丢弃(见 `rinex.c` 的 `set_index()`)—— J03/J07 只剩
+  单频,进 LAMBDA 只有害处。
+- **GLONASS**:`gloarmode` 已经 off,但它仍参与浮点解;0621 那种强多路径测站上会把浮点
+  解也带坏。
+- **BDS-2**:与中海达基站之间有未标定的系统性偏差,性质同下面的 GLONASS IFB。只留 BDS-3
+  时单系统固定率 61%/ratio 544,只留 BDS-2 时 15%/ratio 3.4。B1I/B3I 原始数据本身是干净的
+  (单差 GF 历元间稳健 std 0.007~0.012 m,与伽利略同级),所以这是接收机间的偏差,不是观测
+  质量。换同厂商基站后可以试着放回来。
+
+### 相位噪声模型与"降权代替不了剔除"
+
+`stats-errphase` 从 RTKLIB 缺省的 0.003 提到 **0.006**:单差 GF 检验给出本流动站的相位
+噪声约 1 cm(无人机小天线),3 mm 的模型过于乐观,会让 LAMBDA 选错整数。四个架次全部受益。
+
+但**降权代替不了剔除**:把 `stats-errphaseel` 从 0.006 一路加到 0.08,0621 仍然 0% 固定,
+毫无变化。RTKLIB 2.4.3 的 LAMBDA 是整组固定,带偏的模糊度只要还在集合里,方差再大也照样
+把 ratio 压到 1。所以低仰角要靠 `pos2-arelmask`(踢出模糊度集)和 `pos1-elmask`(彻底剔除),
+不能靠加权。
 
 ### `pos2-gloarmode` 必须按基站厂商设置
 
@@ -200,7 +245,8 @@ float 相对 fixed 的系统差实测为**高程 0.24~0.52 m**、东向 0.08 m �
 直接进正射产品。
 
 换成与流动站同厂商的基站后可以再打开 `gloarmode=on`(多 8~10 颗可固定卫星)，但换之前
-务必先按上表复核一次固定率。另：`pos1-elmask` 不要从 15 降到 10，实测固定率反而掉到 12%。
+务必先按上表复核一次固定率。另：`pos1-elmask` 不要往 15 以下降，实测降到 10 时固定率掉到 12%；
+现在的缺省是 25，且由 `--auto-elmask` 按架次向上挑。
 
 ### 解里混有 fix 和 float 时用 `pos2std_q.py` 而不是 `--floor-h/--floor-v`
 
