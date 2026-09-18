@@ -5,8 +5,12 @@ data/
 *.pos
 rtk_std_analysis*.txt
 test-rtk.txt
+proc/test.txt
 proc/rtkproc_tmp.*
 proc/rtkproc_base_spp.pos
+
+# 运行日志。init() 每次运行都覆盖, 只描述最后一次运行, 不入库。
+*.log
 
 # 构建产物与打包件
 *.o

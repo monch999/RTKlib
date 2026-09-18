@@ -19,6 +19,8 @@ rtkproc.exe <流动站obs> <基站obs> <混合星历nav> [nav2 ...]
             [-o out.txt] [-c rtk.conf]
             [--base-avg | --base-header | --base-llh 纬 经 高]
             [--floor-h 0.046] [--floor-v 0.075] [--scale 1.0] [--keep-pos]
+            [--no-auto-elmask]
+            [--log 文件 | --no-log] [-v|--verbose] [-q|--quiet]
 ```
 
 例:
@@ -29,7 +31,40 @@ rtkproc.exe data\rover.26O data\base.26o data\rover.26P data\base.26p
 
 默认输出 `rtk_std_analysis.txt`(生成在流动站文件所在目录),默认已带 4.6cm/7.5cm 协方差地板;
 设 `--floor-h 0 --floor-v 0` 则输出原始 RTKLIB std。源码见 `rtkproc.cpp`,
-编译:`g++ -O2 -static -static-libgcc -static-libstdc++ -o rtkproc.exe rtkproc.cpp`。
+编译:`g++ -O2 -static -static-libgcc -static-libstdc++ -o rtkproc.exe rtkproc.cpp Logger.cpp`。
+
+### 运行日志
+
+每次运行都会把带时间戳的分级日志同时写到 **stderr** 和 **`rtkproc.log`**,后者默认
+和输出结果放在同一个目录(即 `-o` 指定的那个目录;不给 `-o` 时就是流动站文件所在目录),
+这样一次运行的结果和它的日志始终在一起。日志文件每次运行都被**覆盖**,所以它永远
+只描述最后一次运行,可以直接贴出来排查。
+行首是流水线的步骤编号,步骤下面的细节缩进对齐:
+
+```
+2026-09-18 17:05:12 [INFO] ==> [2/4] Base coordinate: averaging SPP over the whole base file
+2026-09-18 17:05:12 [INFO]       SPP epochs: 2880 read, 12 unusable, 2868 averaged
+2026-09-18 17:05:26 [INFO]       solution quality: fix 1982 (93.7%), float 134 (6.3%), other 0 (0.0%)
+2026-09-18 17:05:26 [INFO]       satellites used: 16.6 mean, 9 min, 18 max (fixed epochs: 16.6 mean)
+2026-09-18 17:05:26 [WARN] 2 epoch(s) ran on fewer than 6 satellites, first at tow 187867 - thin geometry, treat those epochs as degraded
+```
+
+判断一趟解好不好要看两行,缺一不可:
+
+* `solution quality` —— 模糊度**固定**得怎么样。全程没有固定解一般是基站坐标或
+  配置的问题,而不是数据本身。
+* `satellites used` —— 是在**多少几何**上固定的。这两个数字要一起看:五颗星撑起来
+  的 95% 固定率是运气,二十颗星还在浮动则是数据有问题。括号里的"fixed epochs"
+  是只统计固定历元的均值 —— 它明显高于全程均值,说明固定解都集中在天空开阔的
+  那几段,浮动的那几段是缺几何。
+
+低于 6 颗星的历元会单独告警,并给出第一个这样的历元的周内秒:解照样写出去,但
+那几个历元的几何已经撑不住它自己报的标准差了,下游要按降级数据对待。
+
+* `-v` 额外打印 DEBUG:两次 rnx2rtkp 的**完整命令行**(排查引号/路径问题时
+  直接复制到命令行重跑)、退出码、各阶段耗时、SPP 平均的散布(米)。
+* `-q` 关掉控制台输出,日志文件照写;`--no-log` 反过来只留控制台。
+* `--log 文件` 指定日志位置。
 
 ### 输出约定(重要)
 
@@ -55,6 +90,40 @@ RTKLIB 报的形式精度在本机上是毫米级(sdn 中位 2.9 mm),而 RTK 真
 
 换接收机或换基线长度后重新标定:跑一遍 KF-GINS,看它打印的 `Mean normalised
 innovation squared`,把两个 floor 乘以 `sqrt(NIS)` 再跑,一两轮就收敛到 1 附近。
+
+### 掩蔽角自动挑选 `--auto-elmask`(默认开启)
+
+`pos1-elmask` 是整份配置里**唯一属于"测站"而不属于"硬件"**的一项——它要挡掉的是
+基站天线周围反射回来的东西,换个架设点就得重挑。其余各项(navsys、exclsats、
+arelmask、arlockcnt、errphase)在同一对接收机上跨架次通用。
+
+默认行为:先按配置里的 `pos1-elmask` 跑一遍,**固定率 ≥ 80% 且最少卫星数 ≥ 5 就到
+此为止**——健康架次仍然只花一趟解算,和以前一样快。否则继续跑 30/35/40/45 度,
+整条阶梯打完分再挑:按固定率排序,平均 ratio 决胜负,最少卫星数 < 5 的一档直接否决。
+
+**不能一见变好就停**,因为这条曲线不单调。实测 0818 架次:
+
+| `pos1-elmask` | 25 | 30 | 35 | 40 | 45 |
+| --- | --- | --- | --- | --- | --- |
+| 0818 固定率 | 98.0% | 94.9% | 93.8% | **78.3%** | 99.2% |
+| 0621 固定率 | 0.0% | 0.0% | 14.9% | 75.7% | 94.5% |
+
+原因是 RTKLIB 2.4.3 的 LAMBDA 整组固定,"哪些星在模糊度集合里"比"有几颗"影响更大。
+
+日志里每一档都有一行,挑中哪一档也会写明:
+
+```
+2026-09-18 16:52:58 [INFO]       auto-elmask: first pass at 25 deg, ladder to 45 deg if that is not enough
+2026-09-18 16:52:58 [INFO]       elmask 25 deg: fix   0.0%, mean ratio    1.2, fewest sats 8
+2026-09-18 16:53:07 [INFO]       elmask 35 deg: fix  14.5%, mean ratio    7.4, fewest sats 8
+2026-09-18 16:53:21 [INFO]       elmask 45 deg: fix  94.5%, mean ratio  828.3, fewest sats 7
+2026-09-18 16:53:21 [INFO]       auto-elmask picked 45 deg (fix 94.5%, mean ratio 828.3, fewest sats 7)
+```
+
+若整条阶梯都固定不了(ratio 全程 ~1.0),那是基站架在强反射环境里,不是参数能救的。
+核对办法:算基站的码多路径 MP 组合稳健 std,正常 0.4~0.5 m,0621 那天 1.39 m。
+
+`--no-auto-elmask` 回到旧行为:只按配置里那一个值跑一趟。
 
 ### 基站坐标模式(影响绝对精度,不影响相对轨迹)
 
